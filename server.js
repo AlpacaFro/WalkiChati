@@ -2,30 +2,32 @@
 // Deploy this on Render.com (free tier)
 
 const express = require('express');
-const { PeerServer } = require('peer'); // peer@1.x
+const { ExpressPeerServer } = require('peer'); // peer@1.x supports ExpressPeerServer
+const http = require('http');
+const cors = require('cors');
 
 const app = express();
 const PORT = process.env.PORT || 9000;
 
-// Health check — ping this with UptimeRobot to prevent Render sleep
+// Allow ALL origins (needed for local file:// and any hosted domain)
+app.use(cors({ origin: '*' }));
+
+const server = http.createServer(app);
+
+// Health check
 app.get('/', (req, res) => res.send('WalkiChat signaling server is running ✅'));
 
-app.listen(PORT, () => console.log(`Express running on port ${PORT}`));
-
-// PeerJS server runs on its own port internally, proxied by Render
-const peerServer = PeerServer({
-  port: 9001,
-  path: '/peerjs',
+// Mount PeerJS on /peerjs
+const peerServer = ExpressPeerServer(server, {
+  path: '/',
   allow_discovery: false,
   alive_timeout: 60000,
   key: 'walkichat',
-  proxied: true,
 });
 
-peerServer.on('connection', client => {
-  console.log(`[+] Peer connected: ${client.getId()}`);
-});
+app.use('/peerjs', peerServer);
 
-peerServer.on('disconnect', client => {
-  console.log(`[-] Peer disconnected: ${client.getId()}`);
-});
+peerServer.on('connection', client => console.log(`[+] Connected: ${client.getId()}`));
+peerServer.on('disconnect', client => console.log(`[-] Disconnected: ${client.getId()}`));
+
+server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
