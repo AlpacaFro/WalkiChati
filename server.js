@@ -2,24 +2,22 @@
 // Deploy this on Render.com (free tier)
 
 const express = require('express');
-const { ExpressPeerServer } = require('peer'); // peer@1.x supports ExpressPeerServer
+const { ExpressPeerServer } = require('peer');
 const http = require('http');
 const cors = require('cors');
 
 const app = express();
 const PORT = process.env.PORT || 9000;
 
-// Allow ALL origins (needed for local file:// and any hosted domain)
 app.use(cors({ origin: '*' }));
 
 const server = http.createServer(app);
 
-// Health check
 app.get('/', (req, res) => res.send('WalkiChat signaling server is running ✅'));
 
-// Mount PeerJS on /peerjs
+// path here must match what the client sends AFTER /peerjs
 const peerServer = ExpressPeerServer(server, {
-  path: '/',
+  path: '/walkichat',
   allow_discovery: false,
   alive_timeout: 60000,
   key: 'walkichat',
