@@ -18,11 +18,10 @@ app.get('/', (req, res) => res.send('WalkiChat signaling server is running ✅')
 const peerServer = ExpressPeerServer(server, {
   allow_discovery: false,
   alive_timeout: 60000,
-  key: 'walkichat',
 });
 
-// Mount at /peerjs/walkichat so the full path is /peerjs/walkichat/id
-app.use('/peerjs/walkichat', peerServer);
+// peer@1.x: path is just /peerjs — no key in URL
+app.use('/peerjs', peerServer);
 
 peerServer.on('connection', client => console.log(`[+] Connected: ${client.getId()}`));
 peerServer.on('disconnect', client => console.log(`[-] Disconnected: ${client.getId()}`));
