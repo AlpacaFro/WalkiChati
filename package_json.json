@@ -1,0 +1,16 @@
+{
+  "name": "walkichat-server",
+  "version": "1.0.0",
+  "description": "PeerJS signaling server for WalkiChat",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "peer": "^0.6.2"
+  }
+}
