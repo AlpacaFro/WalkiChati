@@ -347,6 +347,17 @@ wss.on('connection', (ws) => {
       return;
     }
 
+    if (msg.type === 'audio_blob') {
+      relayToPeer(ws, {
+        type: 'audio_blob',
+        data: msg.data,
+        mimeType: msg.mimeType || 'audio/webm',
+        ts: msg.ts || new Date().toISOString()
+      });
+
+      return;
+    }
+
     if (msg.type === 'audio') {
       relayToPeer(ws, {
         type: 'audio',
