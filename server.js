@@ -1,5 +1,5 @@
 // server.js — WalkiChat relay server
-// All communication goes through this server via WebSocket (no P2P)
+// WebSocket relay with text, GIF, push-to-talk audio, and active room list
 
 const express = require('express');
 const http = require('http');
@@ -22,23 +22,30 @@ const wss = new WebSocketServer({ server, path: '/ws' });
 // {
 //   roomId: {
 //     host: WebSocket,
-//     guest: WebSocket | null
+//     guest: WebSocket | null,
+//     hostName: string
 //   }
 // }
 const rooms = {};
 
-// Safe JSON sender
 function send(ws, data) {
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(data));
   }
 }
 
-// Find the other person inside the same room
-function getPeer(ws) {
-  if (!ws.roomId || !rooms[ws.roomId]) return null;
+function createRoomId() {
+  return Math.random().toString(36).slice(2, 10);
+}
 
-  const room = rooms[ws.roomId];
+function getRoom(ws) {
+  if (!ws.roomId) return null;
+  return rooms[ws.roomId] || null;
+}
+
+function getPeer(ws) {
+  const room = getRoom(ws);
+  if (!room) return null;
 
   if (ws.role === 'host') return room.guest;
   if (ws.role === 'guest') return room.host;
@@ -46,21 +53,29 @@ function getPeer(ws) {
   return null;
 }
 
-// Relay one message to the connected peer
 function relayToPeer(ws, msg) {
   const peer = getPeer(ws);
   send(peer, msg);
 }
 
-// Generate simple room ID
-function createRoomId() {
-  return Math.random().toString(36).slice(2, 10);
+function getActiveRooms() {
+  return Object.keys(rooms)
+    .filter((roomId) => {
+      const room = rooms[roomId];
+
+      // Show only rooms that have a host and are waiting for a guest
+      return room.host && room.host.readyState === WebSocket.OPEN && !room.guest;
+    })
+    .map((roomId) => ({
+      roomId,
+      hostName: rooms[roomId].hostName || 'Host'
+    }));
 }
 
 wss.on('connection', (ws) => {
   ws.roomId = null;
   ws.role = null;
-  ws.peerName = null;
+  ws.name = null;
 
   console.log('[WS] Client connected');
 
@@ -70,25 +85,38 @@ wss.on('connection', (ws) => {
     try {
       msg = JSON.parse(raw);
     } catch {
-      send(ws, { type: 'error', msg: 'Invalid JSON message' });
+      send(ws, {
+        type: 'error',
+        msg: 'Invalid JSON message'
+      });
       return;
     }
 
     console.log('[WS] Message:', msg.type);
 
-    // ─────────────────────────────
-    // Create room
-    // ─────────────────────────────
+    // Show rooms waiting for a second person
+    if (msg.type === 'list_rooms') {
+      send(ws, {
+        type: 'rooms_list',
+        rooms: getActiveRooms()
+      });
+      return;
+    }
+
+    // Host creates a room
     if (msg.type === 'create') {
       const id = createRoomId();
+      const hostName = String(msg.name || 'Host').trim();
 
       rooms[id] = {
         host: ws,
-        guest: null
+        guest: null,
+        hostName
       };
 
       ws.roomId = id;
       ws.role = 'host';
+      ws.name = hostName;
 
       send(ws, {
         type: 'created',
@@ -99,42 +127,48 @@ wss.on('connection', (ws) => {
       return;
     }
 
-    // ─────────────────────────────
-    // Join room
-    // ─────────────────────────────
+    // Guest joins a room
     if (msg.type === 'join') {
       const roomId = String(msg.roomId || '').trim();
       const name = String(msg.name || 'Friend').trim();
 
       if (!roomId) {
-        send(ws, { type: 'error', msg: 'Missing room ID' });
+        send(ws, {
+          type: 'error',
+          msg: 'Missing room ID'
+        });
         return;
       }
 
       const room = rooms[roomId];
 
       if (!room) {
-        send(ws, { type: 'error', msg: 'Room not found' });
+        send(ws, {
+          type: 'error',
+          msg: 'Room not found'
+        });
         return;
       }
 
       if (room.guest) {
-        send(ws, { type: 'error', msg: 'Room full' });
+        send(ws, {
+          type: 'error',
+          msg: 'Room full'
+        });
         return;
       }
 
       room.guest = ws;
+
       ws.roomId = roomId;
       ws.role = 'guest';
-      ws.peerName = name;
+      ws.name = name;
 
-      // Confirm to guest
       send(ws, {
         type: 'joined',
         roomId
       });
 
-      // Notify host
       send(room.host, {
         type: 'peer_joined',
         name
@@ -144,15 +178,14 @@ wss.on('connection', (ws) => {
       return;
     }
 
-    // From here, user must already be inside a room
     if (!ws.roomId || !rooms[ws.roomId]) {
-      send(ws, { type: 'error', msg: 'You are not in a room' });
+      send(ws, {
+        type: 'error',
+        msg: 'You are not in a room'
+      });
       return;
     }
 
-    // ─────────────────────────────
-    // Exchange names
-    // ─────────────────────────────
     if (msg.type === 'hello') {
       const name = String(msg.name || 'Friend').trim();
 
@@ -164,9 +197,6 @@ wss.on('connection', (ws) => {
       return;
     }
 
-    // ─────────────────────────────
-    // Text message relay
-    // ─────────────────────────────
     if (msg.type === 'text') {
       relayToPeer(ws, {
         type: 'text',
@@ -177,14 +207,12 @@ wss.on('connection', (ws) => {
       return;
     }
 
-    // ─────────────────────────────
-    // GIF message relay
-    // Frontend sends: { type: "gif", url, ts }
-    // Server forwards it to the other person.
-    // ─────────────────────────────
     if (msg.type === 'gif') {
       if (!msg.url) {
-        send(ws, { type: 'error', msg: 'Missing GIF URL' });
+        send(ws, {
+          type: 'error',
+          msg: 'Missing GIF URL'
+        });
         return;
       }
 
@@ -197,9 +225,6 @@ wss.on('connection', (ws) => {
       return;
     }
 
-    // ─────────────────────────────
-    // Push-to-talk status relay
-    // ─────────────────────────────
     if (msg.type === 'ptt_start' || msg.type === 'ptt_stop') {
       relayToPeer(ws, {
         type: msg.type
@@ -208,9 +233,6 @@ wss.on('connection', (ws) => {
       return;
     }
 
-    // ─────────────────────────────
-    // Audio chunk relay
-    // ─────────────────────────────
     if (msg.type === 'audio') {
       relayToPeer(ws, {
         type: 'audio',
@@ -221,7 +243,6 @@ wss.on('connection', (ws) => {
       return;
     }
 
-    // Unknown message
     send(ws, {
       type: 'error',
       msg: `Unknown message type: ${msg.type}`
@@ -240,6 +261,7 @@ wss.on('connection', (ws) => {
       type: 'peer_disconnected'
     });
 
+    // Current app is 1 host + 1 guest, so closing either side closes the room
     delete rooms[roomId];
 
     console.log(`[-] Room closed: ${roomId}`);
