@@ -10,89 +10,246 @@ const app = express();
 const PORT = process.env.PORT || 9000;
 
 app.use(cors({ origin: '*' }));
-app.get('/', (req, res) => res.send('WalkiChat relay server running ✅'));
+
+app.get('/', (req, res) => {
+  res.send('WalkiChat relay server running ✅');
+});
 
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
 
-// rooms: { roomId: { host: ws, guest: ws } }
+// rooms shape:
+// {
+//   roomId: {
+//     host: WebSocket,
+//     guest: WebSocket | null
+//   }
+// }
 const rooms = {};
 
+// Safe JSON sender
 function send(ws, data) {
-  if (ws && ws.readyState === 1) ws.send(JSON.stringify(data));
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(data));
+  }
 }
 
-wss.on('connection', ws => {
+// Find the other person inside the same room
+function getPeer(ws) {
+  if (!ws.roomId || !rooms[ws.roomId]) return null;
+
+  const room = rooms[ws.roomId];
+
+  if (ws.role === 'host') return room.guest;
+  if (ws.role === 'guest') return room.host;
+
+  return null;
+}
+
+// Relay one message to the connected peer
+function relayToPeer(ws, msg) {
+  const peer = getPeer(ws);
+  send(peer, msg);
+}
+
+// Generate simple room ID
+function createRoomId() {
+  return Math.random().toString(36).slice(2, 10);
+}
+
+wss.on('connection', (ws) => {
   ws.roomId = null;
   ws.role = null;
+  ws.peerName = null;
 
-  ws.on('message', raw => {
+  console.log('[WS] Client connected');
+
+  ws.on('message', (raw) => {
     let msg;
-    try { msg = JSON.parse(raw); } catch { return; }
 
+    try {
+      msg = JSON.parse(raw);
+    } catch {
+      send(ws, { type: 'error', msg: 'Invalid JSON message' });
+      return;
+    }
+
+    console.log('[WS] Message:', msg.type);
+
+    // ─────────────────────────────
+    // Create room
+    // ─────────────────────────────
     if (msg.type === 'create') {
-      // Host creates a room
-      const id = Math.random().toString(36).slice(2, 10);
-      rooms[id] = { host: ws, guest: null };
+      const id = createRoomId();
+
+      rooms[id] = {
+        host: ws,
+        guest: null
+      };
+
       ws.roomId = id;
       ws.role = 'host';
-      send(ws, { type: 'created', roomId: id });
+
+      send(ws, {
+        type: 'created',
+        roomId: id
+      });
+
       console.log(`[+] Room created: ${id}`);
-
-    } else if (msg.type === 'join') {
-      // Guest joins a room
-      const room = rooms[msg.roomId];
-      if (!room) { send(ws, { type: 'error', msg: 'Room not found' }); return; }
-      if (room.guest) { send(ws, { type: 'error', msg: 'Room full' }); return; }
-      room.guest = ws;
-      ws.roomId = msg.roomId;
-      ws.role = 'guest';
-      // Notify both sides
-      send(ws, { type: 'joined', roomId: msg.roomId });
-      send(room.host, { type: 'peer_joined', name: msg.name });
-      ws.peerName = msg.name;
-      console.log(`[+] Guest joined room: ${msg.roomId}`);
-
-    } else if (msg.type === 'hello') {
-      // Exchange names
-      const room = rooms[ws.roomId];
-      if (!room) return;
-      const peer = ws.role === 'host' ? room.guest : room.host;
-      send(peer, { type: 'hello', name: msg.name });
-
-    } else if (msg.type === 'text' || msg.type === 'gif') {
-      // Relay chat message to peer
-      const room = rooms[ws.roomId];
-      if (!room) return;
-      const peer = ws.role === 'host' ? room.guest : room.host;
-      send(peer, msg);
-
-    } else if (msg.type === 'ptt_start' || msg.type === 'ptt_stop') {
-      // Relay PTT signal to peer
-      const room = rooms[ws.roomId];
-      if (!room) return;
-      const peer = ws.role === 'host' ? room.guest : room.host;
-      send(peer, msg);
-
-    } else if (msg.type === 'audio') {
-      // Relay audio chunk (base64) to peer
-      const room = rooms[ws.roomId];
-      if (!room) return;
-      const peer = ws.role === 'host' ? room.guest : room.host;
-      send(peer, msg);
+      return;
     }
+
+    // ─────────────────────────────
+    // Join room
+    // ─────────────────────────────
+    if (msg.type === 'join') {
+      const roomId = String(msg.roomId || '').trim();
+      const name = String(msg.name || 'Friend').trim();
+
+      if (!roomId) {
+        send(ws, { type: 'error', msg: 'Missing room ID' });
+        return;
+      }
+
+      const room = rooms[roomId];
+
+      if (!room) {
+        send(ws, { type: 'error', msg: 'Room not found' });
+        return;
+      }
+
+      if (room.guest) {
+        send(ws, { type: 'error', msg: 'Room full' });
+        return;
+      }
+
+      room.guest = ws;
+      ws.roomId = roomId;
+      ws.role = 'guest';
+      ws.peerName = name;
+
+      // Confirm to guest
+      send(ws, {
+        type: 'joined',
+        roomId
+      });
+
+      // Notify host
+      send(room.host, {
+        type: 'peer_joined',
+        name
+      });
+
+      console.log(`[+] Guest joined room: ${roomId}`);
+      return;
+    }
+
+    // From here, user must already be inside a room
+    if (!ws.roomId || !rooms[ws.roomId]) {
+      send(ws, { type: 'error', msg: 'You are not in a room' });
+      return;
+    }
+
+    // ─────────────────────────────
+    // Exchange names
+    // ─────────────────────────────
+    if (msg.type === 'hello') {
+      const name = String(msg.name || 'Friend').trim();
+
+      relayToPeer(ws, {
+        type: 'hello',
+        name
+      });
+
+      return;
+    }
+
+    // ─────────────────────────────
+    // Text message relay
+    // ─────────────────────────────
+    if (msg.type === 'text') {
+      relayToPeer(ws, {
+        type: 'text',
+        text: String(msg.text || ''),
+        ts: msg.ts || new Date().toISOString()
+      });
+
+      return;
+    }
+
+    // ─────────────────────────────
+    // GIF message relay
+    // Frontend sends: { type: "gif", url, ts }
+    // Server forwards it to the other person.
+    // ─────────────────────────────
+    if (msg.type === 'gif') {
+      if (!msg.url) {
+        send(ws, { type: 'error', msg: 'Missing GIF URL' });
+        return;
+      }
+
+      relayToPeer(ws, {
+        type: 'gif',
+        url: String(msg.url),
+        ts: msg.ts || new Date().toISOString()
+      });
+
+      return;
+    }
+
+    // ─────────────────────────────
+    // Push-to-talk status relay
+    // ─────────────────────────────
+    if (msg.type === 'ptt_start' || msg.type === 'ptt_stop') {
+      relayToPeer(ws, {
+        type: msg.type
+      });
+
+      return;
+    }
+
+    // ─────────────────────────────
+    // Audio chunk relay
+    // ─────────────────────────────
+    if (msg.type === 'audio') {
+      relayToPeer(ws, {
+        type: 'audio',
+        data: msg.data,
+        sampleRate: msg.sampleRate || 16000
+      });
+
+      return;
+    }
+
+    // Unknown message
+    send(ws, {
+      type: 'error',
+      msg: `Unknown message type: ${msg.type}`
+    });
   });
 
   ws.on('close', () => {
+    console.log('[WS] Client disconnected');
+
     if (!ws.roomId || !rooms[ws.roomId]) return;
-    const room = rooms[ws.roomId];
-    const peer = ws.role === 'host' ? room.guest : room.host;
-    send(peer, { type: 'peer_disconnected' });
-    delete rooms[ws.roomId];
-    console.log(`[-] Room closed: ${ws.roomId}`);
+
+    const roomId = ws.roomId;
+    const peer = getPeer(ws);
+
+    send(peer, {
+      type: 'peer_disconnected'
+    });
+
+    delete rooms[roomId];
+
+    console.log(`[-] Room closed: ${roomId}`);
   });
 
-  ws.on('error', e => console.error('WS error:', e.message));
+  ws.on('error', (e) => {
+    console.error('[WS] Error:', e.message);
+  });
 });
 
-server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
