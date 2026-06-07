@@ -107,6 +107,10 @@
   .join-small-btn:hover{background:var(--accent-hover)}
   .active-rooms-title{font-size:12px;font-weight:700;color:var(--text2);margin:14px 0 8px;letter-spacing:.4px;text-transform:uppercase}
 
+
+  #unlock-audio-btn{position:fixed;bottom:145px;left:50%;transform:translateX(-50%);background:var(--accent);color:#fff;border:none;border-radius:20px;padding:9px 18px;font-size:13px;font-weight:700;box-shadow:0 4px 16px var(--ptt-glow);display:none;z-index:250;cursor:pointer}
+  #unlock-audio-btn:hover{background:var(--accent-hover)}
+
 </style>
 </head>
 <body>
@@ -184,6 +188,7 @@
   </div>
   <div class="picker-body" id="picker-body"></div>
 </div>
+<button id="unlock-audio-btn" onclick="unlockAudio()">🔊 Enable Audio</button>
 <div id="toast"></div>
 
 <script>
@@ -197,6 +202,7 @@ let ws, myName='', roomId='', isDark=false;
 let pttActive=false, pttSetupDone=false;
 let mediaStream=null, mediaRecorder=null, recordedChunks=[];
 let pickerTab='emoji', gifTimeout=null;
+let audioUnlocked=false, pendingAudioBlobs=[];
 
 // ── WebSocket connect ──
 function connectWS(onOpen) {
@@ -245,6 +251,7 @@ function handleMsg(msg) {
   } else if (msg.type === 'ptt_stop') {
     showIncoming(false);
   } else if (msg.type === 'audio_blob') {
+    console.log('🔊 received audio_blob', msg.mimeType, msg.data?.length);
     playAudioBlob(msg.data, msg.mimeType);
   } else if (msg.type === 'audio') {
     playAudioChunk(msg.data);
@@ -356,6 +363,7 @@ function showApp() {
   setupPTT();
   addDayDivider('Today');
   sysMsg('Room ready • Share invite to connect');
+  document.getElementById('unlock-audio-btn').style.display = 'block';
 }
 
 function setStatus(txt, online) {
@@ -582,39 +590,107 @@ function stopPTT() {
 
 // ── Play incoming audio ──
 
-function playAudioBlob(b64, mimeType = 'audio/webm') {
-  try {
-    const binary = atob(b64);
-    const bytes = new Uint8Array(binary.length);
+function base64ToBlob(b64, mimeType = 'audio/webm') {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
 
-    for (let i = 0; i < binary.length; i++) {
-      bytes[i] = binary.charCodeAt(i);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+
+  return new Blob([bytes], {
+    type: mimeType || 'audio/webm'
+  });
+}
+
+async function unlockAudio() {
+  try {
+    // Play a tiny silent sound to unlock browser audio playback.
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    const ctx = new AudioContextClass();
+
+    const buffer = ctx.createBuffer(1, 1, 22050);
+    const sourceNode = ctx.createBufferSource();
+
+    sourceNode.buffer = buffer;
+    sourceNode.connect(ctx.destination);
+    sourceNode.start(0);
+
+    audioUnlocked = true;
+
+    document.getElementById('unlock-audio-btn').style.display = 'none';
+
+    toast('Audio enabled 🔊');
+
+    // Play anything that arrived before audio was unlocked.
+    const queued = [...pendingAudioBlobs];
+    pendingAudioBlobs = [];
+
+    for (const item of queued) {
+      playAudioBlob(item.data, item.mimeType);
     }
 
-    const blob = new Blob([bytes], {
-      type: mimeType || 'audio/webm'
-    });
+    setTimeout(() => {
+      ctx.close();
+    }, 300);
+  } catch (err) {
+    console.error('Audio unlock failed:', err);
+    toast('Click again to enable audio');
+  }
+}
 
+function playAudioBlob(b64, mimeType = 'audio/webm') {
+  try {
+    if (!audioUnlocked) {
+      pendingAudioBlobs.push({
+        data: b64,
+        mimeType
+      });
+
+      document.getElementById('unlock-audio-btn').style.display = 'block';
+      toast('Tap Enable Audio to hear messages');
+      return;
+    }
+
+    const blob = base64ToBlob(b64, mimeType);
     const url = URL.createObjectURL(blob);
     const audio = new Audio(url);
+
+    audio.preload = 'auto';
+    audio.volume = 1;
 
     audio.onended = () => {
       URL.revokeObjectURL(url);
     };
 
-    audio.onerror = () => {
+    audio.onerror = (err) => {
       URL.revokeObjectURL(url);
-      console.error('Could not play incoming audio blob');
+      console.error('Could not play incoming audio blob:', err);
+      toast('Could not play audio');
     };
 
-    audio.play().catch((err) => {
-      console.error('Audio playback blocked:', err);
-      toast('Tap once to enable audio playback');
-    });
+    const playPromise = audio.play();
+
+    if (playPromise) {
+      playPromise.catch((err) => {
+        console.error('Audio playback blocked:', err);
+
+        pendingAudioBlobs.push({
+          data: b64,
+          mimeType
+        });
+
+        document.getElementById('unlock-audio-btn').style.display = 'block';
+        toast('Tap Enable Audio to hear messages');
+      });
+    }
   } catch (err) {
     console.error('Failed to play audio blob:', err);
+    toast('Failed to play audio');
   }
 }
+
+
 
 
 let playbackCtx = null;
