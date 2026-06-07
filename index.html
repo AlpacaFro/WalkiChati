@@ -95,7 +95,7 @@
   .gif-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px}
   .gif-grid img{width:100%;border-radius:8px;cursor:pointer;transition:opacity .2s}
   .gif-grid img:hover{opacity:.8}
-  .gif-loading{text-align:center;color:var(--text2);font-size:12px;padding:20px}
+  .gif-loading{text-align:center;color:var(--text2);font-size:12px;padding:20px;grid-column:1/-1}
   #incoming-voice{position:fixed;top:70px;left:50%;transform:translateX(-50%);background:var(--accent);color:#fff;padding:6px 18px;border-radius:20px;font-size:13px;font-weight:600;box-shadow:0 4px 16px var(--ptt-glow);display:none;z-index:50}
   #toast{position:fixed;bottom:90px;left:50%;transform:translateX(-50%);background:#333;color:#fff;padding:8px 18px;border-radius:20px;font-size:13px;display:none;z-index:200}
   [data-theme="dark"] #toast{background:#555}
@@ -435,23 +435,81 @@ function renderPicker() {
 }
 function insertEmoji(e) { document.getElementById('msg-input').value+=e; document.getElementById('picker').style.display='none'; }
 function searchGif(q) {
-  clearTimeout(gifTimeout); if(!q.trim()) return;
-  gifTimeout=setTimeout(async()=>{
-    const grid=document.getElementById('gif-grid');
-    grid.innerHTML='<div class="gif-loading">Loading...</div>';
+  clearTimeout(gifTimeout);
+
+  const grid = document.getElementById('gif-grid');
+
+  // When search is empty, reset the GIF panel
+  if (!q.trim()) {
+    grid.innerHTML = '<div class="gif-loading">Search above</div>';
+    return;
+  }
+
+  gifTimeout = setTimeout(async () => {
+    grid.innerHTML = '<div class="gif-loading">Loading...</div>';
+
     try {
-      const r=await fetch(`https://tenor.googleapis.com/v2/search?q=${encodeURIComponent(q)}&key=${TENOR_KEY}&limit=8&media_filter=gif`);
-      const d=await r.json();
-      if(!d.results?.length){grid.innerHTML='<div class="gif-loading">No results</div>';return;}
-      grid.innerHTML=d.results.map(g=>{const u=g.media_formats?.tinygif?.url||'';return u?`<img src="${u}" onclick="sendGif('${u}')" loading="lazy"/>`:''}).join('');
-    } catch{grid.innerHTML='<div class="gif-loading">Failed</div>';}
-  },500);
+      const params = new URLSearchParams({
+        q: q.trim(),
+        key: TENOR_KEY,
+        client_key: 'walkichat',
+        limit: '8',
+        media_filter: 'tinygif,gif',
+        contentfilter: 'medium'
+      });
+
+      const r = await fetch(`https://tenor.googleapis.com/v2/search?${params.toString()}`);
+
+      if (!r.ok) {
+        throw new Error('Tenor request failed');
+      }
+
+      const d = await r.json();
+
+      if (!d.results || !d.results.length) {
+        grid.innerHTML = '<div class="gif-loading">No results</div>';
+        return;
+      }
+
+      // Build GIF elements safely instead of inline onclick strings
+      grid.innerHTML = '';
+
+      d.results.forEach(g => {
+        const url = g.media_formats?.tinygif?.url || g.media_formats?.gif?.url;
+        if (!url) return;
+
+        const img = document.createElement('img');
+        img.src = url;
+        img.alt = 'GIF result';
+        img.loading = 'lazy';
+
+        img.addEventListener('click', () => {
+          sendGif(url);
+        });
+
+        grid.appendChild(img);
+      });
+
+      if (!grid.children.length) {
+        grid.innerHTML = '<div class="gif-loading">No usable GIFs</div>';
+      }
+    } catch (err) {
+      console.error('GIF search failed:', err);
+      grid.innerHTML = '<div class="gif-loading">GIF search failed</div>';
+    }
+  }, 500);
 }
+
 function sendGif(url) {
-  const ts=new Date().toISOString();
-  addBubble('me','gif',url,ts);
-  wsSend({ type:'gif', url, ts });
-  document.getElementById('picker').style.display='none';
+  const ts = new Date().toISOString();
+
+  // Show the GIF instantly for me
+  addBubble('me', 'gif', url, ts);
+
+  // Send the GIF URL to the other user through the WebSocket server
+  wsSend({ type: 'gif', url, ts });
+
+  document.getElementById('picker').style.display = 'none';
 }
 
 // ── Toast ──
