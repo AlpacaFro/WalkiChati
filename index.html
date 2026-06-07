@@ -99,6 +99,14 @@
   #incoming-voice{position:fixed;top:70px;left:50%;transform:translateX(-50%);background:var(--accent);color:#fff;padding:6px 18px;border-radius:20px;font-size:13px;font-weight:600;box-shadow:0 4px 16px var(--ptt-glow);display:none;z-index:50}
   #toast{position:fixed;bottom:90px;left:50%;transform:translateX(-50%);background:#333;color:#fff;padding:8px 18px;border-radius:20px;font-size:13px;display:none;z-index:200}
   [data-theme="dark"] #toast{background:#555}
+
+  .active-room-card{background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:10px;margin-bottom:8px;display:flex;align-items:center;justify-content:space-between;gap:8px}
+  .active-room-id{font-size:13px;color:var(--text);font-weight:600}
+  .active-room-small{font-size:11px;color:var(--text2);margin-top:2px}
+  .join-small-btn{padding:7px 10px;border:none;border-radius:8px;background:var(--accent);color:white;cursor:pointer;font-size:12px;font-weight:600;white-space:nowrap}
+  .join-small-btn:hover{background:var(--accent-hover)}
+  .active-rooms-title{font-size:12px;font-weight:700;color:var(--text2);margin:14px 0 8px;letter-spacing:.4px;text-transform:uppercase}
+
 </style>
 </head>
 <body>
@@ -124,6 +132,18 @@
         <input type="text" id="room-input" placeholder="Paste room ID here"/>
       </div>
       <button class="btn btn-secondary" style="width:100%" onclick="joinRoom()">Join Room →</button>
+      <div style="margin-top:14px">
+        <button class="btn btn-secondary" style="width:100%" onclick="refreshRooms()">🔄 Show Active Chats</button>
+        <div class="active-rooms-title">Active chats</div>
+        <div id="active-rooms">
+          <div class="active-room-card">
+            <div>
+              <div class="active-room-id">No list loaded</div>
+              <div class="active-room-small">Click “Show Active Chats”</div>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </div>
@@ -194,7 +214,9 @@ function wsSend(data) {
 // ── Handle incoming messages ──
 function handleMsg(msg) {
   console.log('← msg:', msg.type);
-  if (msg.type === 'created') {
+  if (msg.type === 'rooms_list') {
+    renderActiveRooms(msg.rooms);
+  } else if (msg.type === 'created') {
     roomId = msg.roomId;
     showApp();
     setStatus('Waiting for friend...', false);
@@ -235,7 +257,7 @@ function handleMsg(msg) {
 // ── Create / Join ──
 function createRoom() {
   myName = document.getElementById('username').value.trim() || 'You';
-  connectWS(() => wsSend({ type: 'create' }));
+  connectWS(() => wsSend({ type: 'create', name: myName }));
 }
 
 function joinRoom() {
@@ -244,6 +266,47 @@ function joinRoom() {
   myName = document.getElementById('username').value.trim() || 'You';
   connectWS(() => wsSend({ type: 'join', roomId: rid, name: myName }));
 }
+
+function refreshRooms() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    connectWS(() => wsSend({ type: 'list_rooms' }));
+    return;
+  }
+  wsSend({ type: 'list_rooms' });
+}
+
+function renderActiveRooms(rooms) {
+  const box = document.getElementById('active-rooms');
+  if (!box) return;
+
+  if (!rooms || !rooms.length) {
+    box.innerHTML = `
+      <div class="active-room-card">
+        <div>
+          <div class="active-room-id">No active chats</div>
+          <div class="active-room-small">Create a room first, then refresh from another browser</div>
+        </div>
+      </div>
+    `;
+    return;
+  }
+
+  box.innerHTML = rooms.map(room => `
+    <div class="active-room-card">
+      <div>
+        <div class="active-room-id">Room: ${room.roomId}</div>
+        <div class="active-room-small">${room.hostName ? `Host: ${room.hostName}` : 'Waiting for someone to join'}</div>
+      </div>
+      <button class="join-small-btn" onclick="joinActiveRoom('${room.roomId}')">Join</button>
+    </div>
+  `).join('');
+}
+
+function joinActiveRoom(id) {
+  document.getElementById('room-input').value = id;
+  joinRoom();
+}
+
 
 // ── Theme ──
 function toggleTheme() {
