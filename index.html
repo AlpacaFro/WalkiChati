@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="en" dir="auto">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>WalkiChat</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.2/peerjs.min.js"></script>
+<style>
+  :root {
+    --bg:#f5f5f5;--surface:#fff;--surface2:#f0f0f0;--border:#e0e0e0;
+    --text:#1a1a1a;--text2:#666;--bubble-me:#cc785c;--bubble-me-text:#fff;
+    --bubble-them:#fff;--bubble-them-text:#1a1a1a;--accent:#cc785c;
+    --accent-hover:#b5633f;--accent2:#e8a87c;--input-bg:#fff;
+    --day-div:#ccc;--shadow:rgba(0,0,0,0.08);--ptt-glow:rgba(204,120,92,0.4);
+    --status-online:#4caf50;
+  }
+  [data-theme="dark"] {
+    --bg:#1a1a2e;--surface:#16213e;--surface2:#0f3460;--border:#2a2a4a;
+    --text:#e0e0e0;--text2:#9090b0;--bubble-them:#1e2a4a;--bubble-them-text:#e0e0e0;
+    --input-bg:#1e2a4a;--day-div:#3a3a5a;--shadow:rgba(0,0,0,0.3);
+    --ptt-glow:rgba(204,120,92,0.5);
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text);height:100vh;display:flex;flex-direction:column;transition:background .3s,color .3s}
+  #lobby{flex:1;display:flex;align-items:center;justify-content:center;padding:24px}
+  .lobby-card{background:var(--surface);border:1px solid var(--border);border-radius:20px;padding:36px 32px;width:100%;max-width:420px;box-shadow:0 8px 32px var(--shadow)}
+  .lobby-logo{text-align:center;margin-bottom:28px}
+  .lobby-logo .icon{font-size:48px}
+  .lobby-logo h1{font-size:26px;font-weight:700;color:var(--accent);margin-top:8px}
+  .lobby-logo p{font-size:13px;color:var(--text2);margin-top:4px}
+  .field{margin-bottom:16px}
+  .field label{display:block;font-size:12px;font-weight:600;color:var(--text2);margin-bottom:6px;letter-spacing:.5px;text-transform:uppercase}
+  .field input{width:100%;padding:11px 14px;border:1.5px solid var(--border);border-radius:10px;background:var(--input-bg);color:var(--text);font-size:14px;outline:none;transition:border-color .2s}
+  .field input:focus{border-color:var(--accent)}
+  .btn-row{display:flex;gap:10px;margin-top:20px}
+  .btn{flex:1;padding:12px;border:none;border-radius:10px;font-size:14px;font-weight:600;cursor:pointer;transition:all .2s}
+  .btn-primary{background:var(--accent);color:#fff}
+  .btn-primary:hover{background:var(--accent-hover)}
+  .btn-secondary{background:var(--surface2);color:var(--text);border:1.5px solid var(--border)}
+  .btn-secondary:hover{border-color:var(--accent);color:var(--accent)}
+  .divider-text{text-align:center;color:var(--text2);font-size:12px;margin:14px 0}
+  #invite-notice{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;border-radius:10px;padding:10px 14px;font-size:13px;margin-bottom:16px;display:none}
+  #app{flex:1;display:none;flex-direction:column;height:100vh;overflow:hidden}
+  .header{display:flex;align-items:center;gap:10px;padding:12px 16px;background:var(--surface);border-bottom:1px solid var(--border);box-shadow:0 2px 8px var(--shadow);z-index:10}
+  .header-avatar{width:38px;height:38px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--accent2));display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0}
+  .header-info{flex:1;min-width:0}
+  .header-info .name{font-weight:700;font-size:15px}
+  .header-info .status{font-size:12px;color:var(--text2);display:flex;align-items:center;gap:5px}
+  .status-dot{width:7px;height:7px;border-radius:50%;background:#aaa;display:inline-block;transition:background .3s}
+  .status-dot.online{background:var(--status-online)}
+  .header-actions{display:flex;gap:8px}
+  .icon-btn{width:34px;height:34px;border-radius:50%;border:none;background:var(--surface2);color:var(--text);cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:16px;transition:background .2s}
+  .icon-btn:hover{background:var(--border)}
+  .room-badge{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:4px 10px;font-size:11px;color:var(--text2);cursor:pointer;transition:all .2s;user-select:none}
+  .room-badge:hover{border-color:var(--accent);color:var(--accent)}
+  #messages{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:2px}
+  #messages::-webkit-scrollbar{width:4px}
+  #messages::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
+  .day-divider{display:flex;align-items:center;gap:10px;margin:16px 0 10px;color:var(--text2);font-size:11px;font-weight:600;letter-spacing:.5px;text-transform:uppercase}
+  .day-divider::before,.day-divider::after{content:'';flex:1;height:1px;background:var(--day-div)}
+  .msg-row{display:flex;margin-bottom:2px;animation:fadeUp .2s ease}
+  @keyframes fadeUp{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+  .msg-row.me{justify-content:flex-end}
+  .bubble{max-width:72%;padding:9px 13px;border-radius:18px;font-size:14px;line-height:1.5;word-break:break-word;position:relative}
+  .msg-row.me .bubble{background:var(--bubble-me);color:var(--bubble-me-text);border-bottom-right-radius:4px}
+  .msg-row.them .bubble{background:var(--bubble-them);color:var(--bubble-them-text);border-bottom-left-radius:4px;box-shadow:0 1px 4px var(--shadow);border:1px solid var(--border)}
+  .bubble .ts{font-size:10px;opacity:.6;margin-top:4px;text-align:right}
+  .msg-row.them .bubble .ts{text-align:left}
+  .bubble.gif-msg{padding:4px;background:transparent!important;border:none!important;box-shadow:none!important}
+  .bubble.gif-msg img{border-radius:14px;max-width:200px;max-height:200px;display:block}
+  .sys-msg{text-align:center;font-size:11px;color:var(--text2);background:var(--surface2);border-radius:20px;padding:4px 14px;margin:8px auto;max-width:280px}
+  .input-bar{padding:10px 12px;background:var(--surface);border-top:1px solid var(--border);display:flex;align-items:flex-end;gap:8px}
+  .input-wrap{flex:1;position:relative}
+  #msg-input{width:100%;padding:10px 40px 10px 14px;border:1.5px solid var(--border);border-radius:22px;background:var(--input-bg);color:var(--text);font-size:14px;outline:none;resize:none;max-height:120px;overflow-y:auto;transition:border-color .2s;line-height:1.4;font-family:inherit}
+  #msg-input:focus{border-color:var(--accent)}
+  #msg-input::placeholder{color:var(--text2)}
+  .emoji-btn{position:absolute;right:10px;bottom:9px;background:none;border:none;cursor:pointer;font-size:18px;opacity:.6;transition:opacity .2s}
+  .emoji-btn:hover{opacity:1}
+  .send-btn{width:40px;height:40px;border-radius:50%;border:none;background:var(--accent);color:#fff;cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center;transition:all .2s;flex-shrink:0}
+  .send-btn:hover{background:var(--accent-hover);transform:scale(1.05)}
+  .ptt-btn{width:48px;height:48px;border-radius:50%;border:2.5px solid var(--accent);background:var(--surface);color:var(--accent);cursor:pointer;font-size:20px;display:flex;align-items:center;justify-content:center;transition:all .15s;flex-shrink:0;user-select:none;-webkit-user-select:none;touch-action:none}
+  .ptt-btn:hover{background:var(--surface2)}
+  .ptt-btn.active{background:var(--accent);color:#fff;box-shadow:0 0 0 6px var(--ptt-glow),0 0 0 12px rgba(204,120,92,.15);transform:scale(1.08);animation:pulse 1s infinite}
+  @keyframes pulse{0%,100%{box-shadow:0 0 0 6px var(--ptt-glow),0 0 0 12px rgba(204,120,92,.15)}50%{box-shadow:0 0 0 10px var(--ptt-glow),0 0 0 20px rgba(204,120,92,.05)}}
+  .ptt-hint{text-align:center;font-size:10px;color:var(--text2);padding:0 12px 6px;letter-spacing:.3px}
+  #picker{position:fixed;bottom:80px;right:12px;width:320px;background:var(--surface);border:1px solid var(--border);border-radius:16px;box-shadow:0 8px 32px var(--shadow);overflow:hidden;display:none;z-index:100}
+  .picker-tabs{display:flex;border-bottom:1px solid var(--border)}
+  .picker-tab{flex:1;padding:10px;border:none;background:none;cursor:pointer;font-size:13px;font-weight:600;color:var(--text2);transition:all .2s}
+  .picker-tab.active{color:var(--accent);border-bottom:2px solid var(--accent)}
+  .picker-body{padding:10px;max-height:220px;overflow-y:auto}
+  .emoji-grid{display:flex;flex-wrap:wrap;gap:4px}
+  .emoji-grid span{font-size:24px;cursor:pointer;padding:4px;border-radius:6px;transition:background .15s}
+  .emoji-grid span:hover{background:var(--surface2)}
+  .gif-search{width:100%;padding:8px 12px;border:1.5px solid var(--border);border-radius:8px;background:var(--input-bg);color:var(--text);font-size:13px;outline:none;margin-bottom:8px}
+  .gif-search:focus{border-color:var(--accent)}
+  .gif-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+  .gif-grid img{width:100%;border-radius:8px;cursor:pointer;transition:opacity .2s}
+  .gif-grid img:hover{opacity:.8}
+  .gif-loading{text-align:center;color:var(--text2);font-size:12px;padding:20px}
+  #incoming-voice{position:fixed;top:70px;left:50%;transform:translateX(-50%);background:var(--accent);color:#fff;padding:6px 18px;border-radius:20px;font-size:13px;font-weight:600;box-shadow:0 4px 16px var(--ptt-glow);display:none;z-index:50}
+  #toast{position:fixed;bottom:90px;left:50%;transform:translateX(-50%);background:#333;color:#fff;padding:8px 18px;border-radius:20px;font-size:13px;display:none;z-index:200}
+  [data-theme="dark"] #toast{background:#555}
+</style>
+</head>
+<body>
+<div id="lobby">
+  <div class="lobby-card">
+    <div class="lobby-logo">
+      <div class="icon">🎙️</div>
+      <h1>WalkiChat</h1>
+      <p>Push-to-talk messenger</p>
+    </div>
+    <div id="invite-notice">📨 You have an invite! Room ID is pre-filled below.</div>
+    <div class="field">
+      <label>Your Name</label>
+      <input type="text" id="username" placeholder="e.g. Yohan" maxlength="24"/>
+    </div>
+    <div class="divider-text">── Create or Join ──</div>
+    <div class="btn-row">
+      <button class="btn btn-primary" onclick="createRoom()">+ Create Room</button>
+    </div>
+    <div style="margin-top:12px">
+      <div class="field">
+        <label>Room ID (to join)</label>
+        <input type="text" id="room-input" placeholder="Paste room ID here"/>
+      </div>
+      <button class="btn btn-secondary" style="width:100%" onclick="joinRoom()">Join Room →</button>
+    </div>
+  </div>
+</div>
+
+<div id="app">
+  <div class="header">
+    <div class="header-avatar">💬</div>
+    <div class="header-info">
+      <div class="name" id="peer-name">Waiting...</div>
+      <div class="status">
+        <span class="status-dot" id="status-dot"></span>
+        <span id="status-text">Connecting...</span>
+      </div>
+    </div>
+    <div class="header-actions">
+      <div class="room-badge" id="room-badge" onclick="copyInvite()">🔗 Copy Invite</div>
+      <button class="icon-btn" onclick="toggleTheme()" id="theme-btn">🌙</button>
+    </div>
+  </div>
+  <div id="messages"></div>
+  <div id="incoming-voice">🎙️ Friend is talking...</div>
+  <div class="ptt-hint">Hold 🎙 button or <kbd>Space</kbd> to talk</div>
+  <div class="input-bar">
+    <button class="ptt-btn" id="ptt-btn">🎙️</button>
+    <div class="input-wrap">
+      <textarea id="msg-input" rows="1" placeholder="Type a message..." onkeydown="handleKey(event)" oninput="autoResize(this)"></textarea>
+      <button class="emoji-btn" onclick="togglePicker()">😊</button>
+    </div>
+    <button class="send-btn" onclick="sendText()">➤</button>
+  </div>
+</div>
+
+<div id="picker">
+  <div class="picker-tabs">
+    <button class="picker-tab active" onclick="switchTab('emoji')">😊 Emoji</button>
+    <button class="picker-tab" onclick="switchTab('gif')">GIF</button>
+  </div>
+  <div class="picker-body" id="picker-body"></div>
+</div>
+<div id="toast"></div>
+
+<script>
+const TENOR_KEY = 'AIzaSyAyimkuYQYF_y19kkWNFNBa4OGb3vDh7Oc';
+const METERED_API = 'https://walkiechat.metered.live/api/v1/turn/credentials?apiKey=5d328fd82c0cce2c4d90717becbebcb6d5d0';
+const EMOJIS = ['😀','😂','🥰','😎','🤔','😅','😭','🥳','😴','🤯','👍','👎','❤️','🔥','💯','🎉','🙏','💪','👀','😤','🤝','😱','🤣','😊','😍','🥺','😏','😬','🤦','🙄','👋','✨','💀','🎶','⚡','🫡','🍕','☕','🏆','🎯'];
+
+let peer, conn, myName='', roomId='', isDark=false;
+let helloSent=false, pttActive=false, pttSetupDone=false;
+let mediaStream=null, currentCall=null, remoteAudio=null;
+let pickerTab='emoji', gifTimeout=null;
+
+// ── Fetch Metered TURN credentials ──
+async function getIceServers() {
+  try {
+    const r = await fetch(METERED_API);
+    const servers = await r.json();
+    console.log('✅ Metered ICE servers loaded:', servers);
+    return servers;
+  } catch(e) {
+    console.warn('⚠️ Metered fetch failed, using fallback', e);
+    return [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'turns:global.relay.metered.ca:443?transport=tcp', username: '1e46fc177f9bb22b16793412', credential: 'ghsagdNiqqGI0SG6' }
+    ];
+  }
+}
+
+// ── Build PeerJS config ──
+async function buildConfig() {
+  const iceServers = await getIceServers();
+  return {
+    host: 'walkichati.onrender.com',
+    port: 443,
+    path: '/peerjs',
+    secure: true,
+    debug: 2,
+    config: { iceServers, iceTransportPolicy: 'relay' }
+  };
+}
+
+// ── Theme ──
+function toggleTheme() {
+  isDark = !isDark;
+  document.documentElement.setAttribute('data-theme', isDark ? 'dark' : '');
+  document.getElementById('theme-btn').textContent = isDark ? '☀️' : '🌙';
+}
+
+// ── Invite from URL ──
+window.onload = () => {
+  const inv = new URLSearchParams(location.search).get('room');
+  if (inv) {
+    document.getElementById('room-input').value = inv;
+    document.getElementById('invite-notice').style.display = 'block';
+  }
+};
+
+// ── PeerJS init ──
+function initPeer(config) {
+  const p = new Peer(config);
+  p.on('open', id => { roomId = id; console.log('My peer ID:', id); });
+  p.on('connection', c => { conn = c; helloSent = false; setupConn(); sysMsg(`${c.peer.slice(0,6)} joined`); });
+  p.on('call', call => {
+    currentCall = call;
+    call.answer();
+    call.on('stream', s => playRemote(s));
+    call.on('close', stopRemote);
+    call.peerConnection.oniceconnectionstatechange = () =>
+      console.log('ICE state (incoming):', call.peerConnection.iceConnectionState);
+  });
+  p.on('error', e => { console.error('PeerJS error:', e); toast('Error: ' + e.type); });
+  return p;
+}
+
+// ── Create / Join ──
+async function createRoom() {
+  myName = document.getElementById('username').value.trim() || 'You';
+  toast('Connecting to TURN server...');
+  const cfg = await buildConfig();
+  peer = initPeer(cfg);
+  peer.on('open', id => {
+    roomId = id;
+    showApp();
+    setStatus('Waiting for friend...', false);
+    document.getElementById('peer-name').textContent = 'Waiting for friend...';
+  });
+}
+
+async function joinRoom() {
+  const rid = document.getElementById('room-input').value.trim();
+  if (!rid) { toast('Enter a room ID first'); return; }
+  myName = document.getElementById('username').value.trim() || 'You';
+  toast('Connecting to TURN server...');
+  const cfg = await buildConfig();
+  peer = initPeer(cfg);
+  peer.on('open', () => {
+    roomId = rid;
+    conn = peer.connect(rid, { serialization: 'json', reliable: true });
+    setupConn();
+    showApp();
+    setStatus('Connecting...', false);
+  });
+}
+
+// ── Connection setup ──
+function setupConn() {
+  const t = setTimeout(() => {
+    if (!conn?.open) { setStatus('Timed out', false); sysMsg('Connection timed out. Try a fresh invite.'); }
+  }, 15000);
+  conn.on('open', () => {
+    clearTimeout(t);
+    console.log('✅ Data channel open! conn.open:', conn.open, '| peer:', conn.peer);
+    sendHelloOnce();
+    setStatus('Online', true);
+  });
+  conn.on('data', handleData);
+  conn.on('close', () => { clearTimeout(t); setStatus('Disconnected', false); sysMsg('Friend disconnected'); });
+  conn.on('error', e => { clearTimeout(t); console.error(e); toast('Connection error'); });
+}
+
+function sendHelloOnce() {
+  if (helloSent || !conn?.open) return;
+  helloSent = true;
+  conn.send({ type: 'hello', name: myName });
+}
+
+function handleData(d) {
+  if (d.type === 'hello') {
+    document.getElementById('peer-name').textContent = d.name;
+    sendHelloOnce();
+    setStatus('Online', true);
+  } else if (d.type === 'text') addBubble('them','text',d.text,d.ts);
+  else if (d.type === 'gif') addBubble('them','gif',d.url,d.ts);
+  else if (d.type === 'ptt_start') showIncoming(true);
+  else if (d.type === 'ptt_stop') showIncoming(false);
+}
+
+// ── UI ──
+function showApp() {
+  document.getElementById('lobby').style.display = 'none';
+  document.getElementById('app').style.display = 'flex';
+  document.getElementById('room-badge').textContent = '🔗 ' + roomId.slice(0,8) + '...';
+  setupPTT();
+  addDayDivider('Today');
+  sysMsg('Room ready • Share invite to connect');
+}
+
+function setStatus(txt, online) {
+  document.getElementById('status-text').textContent = txt;
+  document.getElementById('status-dot').className = 'status-dot' + (online ? ' online' : '');
+}
+
+function addDayDivider(label) {
+  const el = document.createElement('div');
+  el.className = 'day-divider'; el.textContent = label;
+  document.getElementById('messages').appendChild(el);
+}
+
+function sysMsg(txt) {
+  const el = document.createElement('div');
+  el.className = 'sys-msg'; el.textContent = txt;
+  document.getElementById('messages').appendChild(el);
+  scrollBottom();
+}
+
+function addBubble(side, kind, content, tsOverride) {
+  const now = tsOverride ? new Date(tsOverride) : new Date();
+  const ts = now.toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
+  const todayStr = new Date().toDateString();
+  const msgs = document.getElementById('messages');
+  const dividers = msgs.querySelectorAll('.day-divider');
+  const lastDiv = dividers[dividers.length-1];
+  const dayLabel = now.toDateString() === todayStr ? 'Today' : now.toLocaleDateString([],{weekday:'long',month:'short',day:'numeric'});
+  if (!lastDiv || lastDiv.textContent !== dayLabel) addDayDivider(dayLabel);
+  const row = document.createElement('div');
+  row.className = 'msg-row ' + side;
+  const bubble = document.createElement('div');
+  if (kind === 'gif') {
+    bubble.className = 'bubble gif-msg';
+    const img = document.createElement('img'); img.src = content; img.alt = 'GIF';
+    bubble.appendChild(img);
+  } else {
+    bubble.className = 'bubble'; bubble.textContent = content;
+    const tsEl = document.createElement('div'); tsEl.className = 'ts'; tsEl.textContent = ts;
+    bubble.appendChild(tsEl);
+  }
+  row.appendChild(bubble); msgs.appendChild(row); scrollBottom();
+}
+
+function scrollBottom() { const m = document.getElementById('messages'); m.scrollTop = m.scrollHeight; }
+
+// ── Send ──
+function sendText() {
+  const inp = document.getElementById('msg-input');
+  const txt = inp.value.trim(); if (!txt) return;
+  const ts = new Date().toISOString();
+  addBubble('me','text',txt,ts);
+  if (conn?.open) conn.send({ type:'text', text:txt, ts });
+  inp.value = ''; inp.style.height = 'auto';
+}
+
+function handleKey(e) { if (e.key==='Enter'&&!e.shiftKey) { e.preventDefault(); sendText(); } }
+function autoResize(el) { el.style.height='auto'; el.style.height=Math.min(el.scrollHeight,120)+'px'; }
+
+// ── PTT ──
+function setupPTT() {
+  if (pttSetupDone) return; pttSetupDone = true;
+  const btn = document.getElementById('ptt-btn');
+  btn.addEventListener('mousedown', startPTT);
+  btn.addEventListener('mouseup', stopPTT);
+  btn.addEventListener('mouseleave', stopPTT);
+  btn.addEventListener('touchstart', e => { e.preventDefault(); startPTT(); });
+  btn.addEventListener('touchend', e => { e.preventDefault(); stopPTT(); });
+  document.addEventListener('keydown', e => { if (e.code==='Space'&&e.target.tagName!=='TEXTAREA'&&!pttActive) { e.preventDefault(); startPTT(); } });
+  document.addEventListener('keyup', e => { if (e.code==='Space') stopPTT(); });
+}
+
+async function startPTT() {
+  if (pttActive) return;
+
+  // If data channel isn't open, warn and abort
+  if (!conn || !conn.open) {
+    console.warn('PTT blocked — conn.open:', conn?.open, '| conn:', conn);
+    toast('Not connected yet — wait a moment and try again');
+    return;
+  }
+
+  pttActive = true;
+  document.getElementById('ptt-btn').classList.add('active');
+  console.log('PTT start — conn.open:', conn?.open);
+  conn.send({ type: 'ptt_start' });
+  try {
+    mediaStream = await navigator.mediaDevices.getUserMedia({ audio:true, video:false });
+    if (peer && conn?.open) {
+      currentCall = peer.call(conn.peer, mediaStream);
+      currentCall.on('stream', s => playRemote(s));
+      currentCall.on('close', stopRemote);
+      currentCall.peerConnection.oniceconnectionstatechange = () =>
+        console.log('ICE state (outgoing):', currentCall.peerConnection.iceConnectionState);
+    }
+  } catch(e) { toast('Mic access denied'); stopPTT(); }
+}
+
+function stopPTT() {
+  if (!pttActive) return; pttActive = false;
+  document.getElementById('ptt-btn').classList.remove('active');
+  if (conn?.open) conn.send({ type:'ptt_stop' });
+  mediaStream?.getTracks().forEach(t => t.stop()); mediaStream = null;
+  currentCall?.close(); currentCall = null;
+}
+
+function playRemote(stream) {
+  if (!remoteAudio) { remoteAudio = new Audio(); remoteAudio.autoplay = true; document.body.appendChild(remoteAudio); }
+  remoteAudio.srcObject = stream;
+}
+
+function stopRemote() { if (remoteAudio) remoteAudio.srcObject = null; }
+function showIncoming(show) { document.getElementById('incoming-voice').style.display = show ? 'block' : 'none'; }
+
+// ── Invite ──
+function copyInvite() {
+  const url = location.origin + location.pathname + '?room=' + encodeURIComponent(roomId);
+  navigator.clipboard.writeText(url).then(() => toast('Invite link copied! 🔗'));
+}
+
+// ── Emoji/GIF Picker ──
+function togglePicker() {
+  const p = document.getElementById('picker');
+  const show = p.style.display !== 'block';
+  p.style.display = show ? 'block' : 'none';
+  if (show) renderPicker();
+}
+document.addEventListener('click', e => {
+  if (!e.target.closest('#picker')&&!e.target.closest('.emoji-btn')) document.getElementById('picker').style.display='none';
+});
+function switchTab(tab) {
+  pickerTab = tab;
+  document.querySelectorAll('.picker-tab').forEach((t,i) => t.classList.toggle('active',(i===0&&tab==='emoji')||(i===1&&tab==='gif')));
+  renderPicker();
+}
+function renderPicker() {
+  const body = document.getElementById('picker-body');
+  if (pickerTab==='emoji') body.innerHTML=`<div class="emoji-grid">${EMOJIS.map(e=>`<span onclick="insertEmoji('${e}')">${e}</span>`).join('')}</div>`;
+  else body.innerHTML=`<input class="gif-search" placeholder="Search GIFs..." oninput="searchGif(this.value)"/><div id="gif-grid" class="gif-grid"><div class="gif-loading">Search above</div></div>`;
+}
+function insertEmoji(e) { document.getElementById('msg-input').value+=e; document.getElementById('picker').style.display='none'; }
+function searchGif(q) {
+  clearTimeout(gifTimeout); if (!q.trim()) return;
+  gifTimeout = setTimeout(async () => {
+    const grid = document.getElementById('gif-grid');
+    grid.innerHTML = '<div class="gif-loading">Loading...</div>';
+    try {
+      const r = await fetch(`https://tenor.googleapis.com/v2/search?q=${encodeURIComponent(q)}&key=${TENOR_KEY}&limit=8&media_filter=gif`);
+      const d = await r.json();
+      if (!d.results?.length) { grid.innerHTML='<div class="gif-loading">No results</div>'; return; }
+      grid.innerHTML = d.results.map(g => { const u=g.media_formats?.tinygif?.url||''; return u?`<img src="${u}" onclick="sendGif('${u}')" loading="lazy"/>`:'' }).join('');
+    } catch { grid.innerHTML='<div class="gif-loading">Failed</div>'; }
+  }, 500);
+}
+function sendGif(url) {
+  const ts = new Date().toISOString();
+  addBubble('me','gif',url,ts);
+  if (conn?.open) conn.send({ type:'gif', url, ts });
+  document.getElementById('picker').style.display='none';
+}
+
+// ── Toast ──
+function toast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.style.display = 'block';
+  setTimeout(() => t.style.display='none', 2500);
+}
+</script>
+</body>
+</html>
