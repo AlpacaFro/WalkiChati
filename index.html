@@ -4,7 +4,6 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>WalkiChat</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.2/peerjs.min.js"></script>
 <style>
   :root {
     --bg:#f5f5f5;--surface:#fff;--surface2:#f0f0f0;--border:#e0e0e0;
@@ -167,42 +166,83 @@
 <div id="toast"></div>
 
 <script>
+// ── Config ──
+const SERVER = 'wss://walkichati.onrender.com/ws';
 const TENOR_KEY = 'AIzaSyAyimkuYQYF_y19kkWNFNBa4OGb3vDh7Oc';
-const METERED_API = 'https://walkiechat.metered.live/api/v1/turn/credentials?apiKey=5d328fd82c0cce2c4d90717becbebcb6d5d0';
 const EMOJIS = ['😀','😂','🥰','😎','🤔','😅','😭','🥳','😴','🤯','👍','👎','❤️','🔥','💯','🎉','🙏','💪','👀','😤','🤝','😱','🤣','😊','😍','🥺','😏','😬','🤦','🙄','👋','✨','💀','🎶','⚡','🫡','🍕','☕','🏆','🎯'];
 
-let peer, conn, myName='', roomId='', isDark=false;
-let helloSent=false, pttActive=false, pttSetupDone=false;
-let mediaStream=null, currentCall=null, remoteAudio=null;
+// ── State ──
+let ws, myName='', roomId='', isDark=false;
+let pttActive=false, pttSetupDone=false;
+let mediaStream=null, audioCtx=null, processor=null, source=null;
 let pickerTab='emoji', gifTimeout=null;
 
-// ── Fetch Metered TURN credentials ──
-async function getIceServers() {
-  try {
-    const r = await fetch(METERED_API);
-    const servers = await r.json();
-    console.log('✅ Metered ICE servers loaded:', servers);
-    return servers;
-  } catch(e) {
-    console.warn('⚠️ Metered fetch failed, using fallback', e);
-    return [
-      { urls: 'stun:stun.l.google.com:19302' },
-      { urls: 'turns:global.relay.metered.ca:443?transport=tcp', username: '1e46fc177f9bb22b16793412', credential: 'ghsagdNiqqGI0SG6' }
-    ];
+// ── WebSocket connect ──
+function connectWS(onOpen) {
+  ws = new WebSocket(SERVER);
+  ws.onopen = () => { console.log('✅ WS connected'); onOpen(); };
+  ws.onmessage = e => handleMsg(JSON.parse(e.data));
+  ws.onclose = () => { setStatus('Disconnected', false); sysMsg('Disconnected from server'); };
+  ws.onerror = e => { console.error('WS error', e); toast('Server connection failed'); };
+}
+
+function wsSend(data) {
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(data));
+  else console.warn('WS not open, dropping:', data.type);
+}
+
+// ── Handle incoming messages ──
+function handleMsg(msg) {
+  console.log('← msg:', msg.type);
+  if (msg.type === 'created') {
+    roomId = msg.roomId;
+    showApp();
+    setStatus('Waiting for friend...', false);
+    document.getElementById('peer-name').textContent = 'Waiting for friend...';
+    document.getElementById('room-badge').textContent = '🔗 ' + roomId;
+  } else if (msg.type === 'joined') {
+    roomId = msg.roomId;
+    showApp();
+    setStatus('Connected!', true);
+    wsSend({ type: 'hello', name: myName });
+  } else if (msg.type === 'peer_joined') {
+    setStatus('Connected!', true);
+    sysMsg(`${msg.name} joined the room`);
+    document.getElementById('peer-name').textContent = msg.name;
+    wsSend({ type: 'hello', name: myName });
+  } else if (msg.type === 'hello') {
+    document.getElementById('peer-name').textContent = msg.name;
+    setStatus('Connected!', true);
+  } else if (msg.type === 'text') {
+    addBubble('them', 'text', msg.text, msg.ts);
+  } else if (msg.type === 'gif') {
+    addBubble('them', 'gif', msg.url, msg.ts);
+  } else if (msg.type === 'ptt_start') {
+    showIncoming(true);
+  } else if (msg.type === 'ptt_stop') {
+    showIncoming(false);
+  } else if (msg.type === 'audio') {
+    playAudioChunk(msg.data);
+  } else if (msg.type === 'peer_disconnected') {
+    setStatus('Friend disconnected', false);
+    sysMsg('Friend disconnected');
+    document.getElementById('peer-name').textContent = 'Waiting...';
+  } else if (msg.type === 'error') {
+    toast('Error: ' + msg.msg);
   }
 }
 
-// ── Build PeerJS config ──
-async function buildConfig() {
-  const iceServers = await getIceServers();
-  return {
-    host: 'walkichati.onrender.com',
-    port: 443,
-    path: '/peerjs',
-    secure: true,
-    debug: 2,
-    config: { iceServers, iceTransportPolicy: 'relay' }
-  };
+// ── Create / Join ──
+function createRoom() {
+  myName = document.getElementById('username').value.trim() || 'You';
+  connectWS(() => wsSend({ type: 'create' }));
+}
+
+function joinRoom() {
+  const rid = document.getElementById('room-input').value.trim();
+  if (!rid) { toast('Enter a room ID first'); return; }
+  myName = document.getElementById('username').value.trim() || 'You';
+  connectWS(() => wsSend({ type: 'join', roomId: rid, name: myName }));
 }
 
 // ── Theme ──
@@ -221,91 +261,10 @@ window.onload = () => {
   }
 };
 
-// ── PeerJS init ──
-function initPeer(config) {
-  const p = new Peer(config);
-  p.on('open', id => { roomId = id; console.log('My peer ID:', id); });
-  p.on('connection', c => { conn = c; helloSent = false; setupConn(); sysMsg(`${c.peer.slice(0,6)} joined`); });
-  p.on('call', call => {
-    currentCall = call;
-    call.answer();
-    call.on('stream', s => playRemote(s));
-    call.on('close', stopRemote);
-    call.peerConnection.oniceconnectionstatechange = () =>
-      console.log('ICE state (incoming):', call.peerConnection.iceConnectionState);
-  });
-  p.on('error', e => { console.error('PeerJS error:', e); toast('Error: ' + e.type); });
-  return p;
-}
-
-// ── Create / Join ──
-async function createRoom() {
-  myName = document.getElementById('username').value.trim() || 'You';
-  toast('Connecting to TURN server...');
-  const cfg = await buildConfig();
-  peer = initPeer(cfg);
-  peer.on('open', id => {
-    roomId = id;
-    showApp();
-    setStatus('Waiting for friend...', false);
-    document.getElementById('peer-name').textContent = 'Waiting for friend...';
-  });
-}
-
-async function joinRoom() {
-  const rid = document.getElementById('room-input').value.trim();
-  if (!rid) { toast('Enter a room ID first'); return; }
-  myName = document.getElementById('username').value.trim() || 'You';
-  toast('Connecting to TURN server...');
-  const cfg = await buildConfig();
-  peer = initPeer(cfg);
-  peer.on('open', () => {
-    roomId = rid;
-    conn = peer.connect(rid, { serialization: 'json', reliable: true });
-    setupConn();
-    showApp();
-    setStatus('Connecting...', false);
-  });
-}
-
-// ── Connection setup ──
-function setupConn() {
-  const t = setTimeout(() => {
-    if (!conn?.open) { setStatus('Timed out', false); sysMsg('Connection timed out. Try a fresh invite.'); }
-  }, 15000);
-  conn.on('open', () => {
-    clearTimeout(t);
-    console.log('✅ Data channel open! conn.open:', conn.open, '| peer:', conn.peer);
-    sendHelloOnce();
-    setStatus('Online', true);
-  });
-  conn.on('data', handleData);
-  conn.on('close', () => { clearTimeout(t); setStatus('Disconnected', false); sysMsg('Friend disconnected'); });
-  conn.on('error', e => { clearTimeout(t); console.error(e); toast('Connection error'); });
-}
-
-function sendHelloOnce() {
-  if (helloSent || !conn?.open) return;
-  helloSent = true;
-  conn.send({ type: 'hello', name: myName });
-}
-
-function handleData(d) {
-  if (d.type === 'hello') {
-    document.getElementById('peer-name').textContent = d.name;
-    sendHelloOnce();
-    setStatus('Online', true);
-  } else if (d.type === 'text') addBubble('them','text',d.text,d.ts);
-  else if (d.type === 'gif') addBubble('them','gif',d.url,d.ts);
-  else if (d.type === 'ptt_start') showIncoming(true);
-  else if (d.type === 'ptt_stop') showIncoming(false);
-}
-
 // ── UI ──
 function showApp() {
   document.getElementById('lobby').style.display = 'none';
   document.getElementById('app').style.display = 'flex';
-  document.getElementById('room-badge').textContent = '🔗 ' + roomId.slice(0,8) + '...';
   setupPTT();
   addDayDivider('Today');
   sysMsg('Room ready • Share invite to connect');
@@ -332,11 +291,11 @@ function sysMsg(txt) {
 function addBubble(side, kind, content, tsOverride) {
   const now = tsOverride ? new Date(tsOverride) : new Date();
   const ts = now.toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
-  const todayStr = new Date().toDateString();
   const msgs = document.getElementById('messages');
   const dividers = msgs.querySelectorAll('.day-divider');
   const lastDiv = dividers[dividers.length-1];
-  const dayLabel = now.toDateString() === todayStr ? 'Today' : now.toLocaleDateString([],{weekday:'long',month:'short',day:'numeric'});
+  const todayStr = new Date().toDateString();
+  const dayLabel = now.toDateString()===todayStr ? 'Today' : now.toLocaleDateString([],{weekday:'long',month:'short',day:'numeric'});
   if (!lastDiv || lastDiv.textContent !== dayLabel) addDayDivider(dayLabel);
   const row = document.createElement('div');
   row.className = 'msg-row ' + side;
@@ -347,81 +306,106 @@ function addBubble(side, kind, content, tsOverride) {
     bubble.appendChild(img);
   } else {
     bubble.className = 'bubble'; bubble.textContent = content;
-    const tsEl = document.createElement('div'); tsEl.className = 'ts'; tsEl.textContent = ts;
+    const tsEl = document.createElement('div'); tsEl.className='ts'; tsEl.textContent=ts;
     bubble.appendChild(tsEl);
   }
   row.appendChild(bubble); msgs.appendChild(row); scrollBottom();
 }
 
-function scrollBottom() { const m = document.getElementById('messages'); m.scrollTop = m.scrollHeight; }
+function scrollBottom() { const m=document.getElementById('messages'); m.scrollTop=m.scrollHeight; }
 
-// ── Send ──
+// ── Send text ──
 function sendText() {
   const inp = document.getElementById('msg-input');
   const txt = inp.value.trim(); if (!txt) return;
   const ts = new Date().toISOString();
   addBubble('me','text',txt,ts);
-  if (conn?.open) conn.send({ type:'text', text:txt, ts });
-  inp.value = ''; inp.style.height = 'auto';
+  wsSend({ type:'text', text:txt, ts });
+  inp.value=''; inp.style.height='auto';
 }
 
-function handleKey(e) { if (e.key==='Enter'&&!e.shiftKey) { e.preventDefault(); sendText(); } }
+function handleKey(e) { if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendText();} }
 function autoResize(el) { el.style.height='auto'; el.style.height=Math.min(el.scrollHeight,120)+'px'; }
 
 // ── PTT ──
 function setupPTT() {
-  if (pttSetupDone) return; pttSetupDone = true;
+  if (pttSetupDone) return; pttSetupDone=true;
   const btn = document.getElementById('ptt-btn');
   btn.addEventListener('mousedown', startPTT);
   btn.addEventListener('mouseup', stopPTT);
   btn.addEventListener('mouseleave', stopPTT);
-  btn.addEventListener('touchstart', e => { e.preventDefault(); startPTT(); });
-  btn.addEventListener('touchend', e => { e.preventDefault(); stopPTT(); });
-  document.addEventListener('keydown', e => { if (e.code==='Space'&&e.target.tagName!=='TEXTAREA'&&!pttActive) { e.preventDefault(); startPTT(); } });
-  document.addEventListener('keyup', e => { if (e.code==='Space') stopPTT(); });
+  btn.addEventListener('touchstart', e=>{e.preventDefault();startPTT();});
+  btn.addEventListener('touchend', e=>{e.preventDefault();stopPTT();});
+  document.addEventListener('keydown', e=>{ if(e.code==='Space'&&e.target.tagName!=='TEXTAREA'&&!pttActive){e.preventDefault();startPTT();} });
+  document.addEventListener('keyup', e=>{ if(e.code==='Space') stopPTT(); });
 }
 
 async function startPTT() {
   if (pttActive) return;
-
-  // If data channel isn't open, warn and abort
-  if (!conn || !conn.open) {
-    console.warn('PTT blocked — conn.open:', conn?.open, '| conn:', conn);
-    toast('Not connected yet — wait a moment and try again');
-    return;
-  }
-
   pttActive = true;
   document.getElementById('ptt-btn').classList.add('active');
-  console.log('PTT start — conn.open:', conn?.open);
-  conn.send({ type: 'ptt_start' });
+  wsSend({ type: 'ptt_start' });
   try {
-    mediaStream = await navigator.mediaDevices.getUserMedia({ audio:true, video:false });
-    if (peer && conn?.open) {
-      currentCall = peer.call(conn.peer, mediaStream);
-      currentCall.on('stream', s => playRemote(s));
-      currentCall.on('close', stopRemote);
-      currentCall.peerConnection.oniceconnectionstatechange = () =>
-        console.log('ICE state (outgoing):', currentCall.peerConnection.iceConnectionState);
-    }
+    mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    // Use Web Audio API to capture and encode audio as base64 chunks
+    audioCtx = new AudioContext({ sampleRate: 16000 }); // 16kHz for smaller chunks
+    source = audioCtx.createMediaStreamSource(mediaStream);
+    processor = audioCtx.createScriptProcessor(4096, 1, 1);
+    source.connect(processor);
+    processor.connect(audioCtx.destination);
+    processor.onaudioprocess = e => {
+      const float32 = e.inputBuffer.getChannelData(0);
+      // Convert float32 to int16 for efficient transfer
+      const int16 = new Int16Array(float32.length);
+      for (let i=0; i<float32.length; i++) int16[i] = Math.max(-32768, Math.min(32767, float32[i]*32768));
+      // Base64 encode
+      const bytes = new Uint8Array(int16.buffer);
+      let b64 = '';
+      for (let i=0; i<bytes.length; i++) b64 += String.fromCharCode(bytes[i]);
+      wsSend({ type: 'audio', data: btoa(b64), sampleRate: 16000 });
+    };
+    console.log('🎙️ PTT started');
   } catch(e) { toast('Mic access denied'); stopPTT(); }
 }
 
 function stopPTT() {
-  if (!pttActive) return; pttActive = false;
+  if (!pttActive) return; pttActive=false;
   document.getElementById('ptt-btn').classList.remove('active');
-  if (conn?.open) conn.send({ type:'ptt_stop' });
-  mediaStream?.getTracks().forEach(t => t.stop()); mediaStream = null;
-  currentCall?.close(); currentCall = null;
+  wsSend({ type: 'ptt_stop' });
+  if (processor) { processor.disconnect(); processor=null; }
+  if (source) { source.disconnect(); source=null; }
+  if (audioCtx) { audioCtx.close(); audioCtx=null; }
+  if (mediaStream) { mediaStream.getTracks().forEach(t=>t.stop()); mediaStream=null; }
+  console.log('🎙️ PTT stopped');
 }
 
-function playRemote(stream) {
-  if (!remoteAudio) { remoteAudio = new Audio(); remoteAudio.autoplay = true; document.body.appendChild(remoteAudio); }
-  remoteAudio.srcObject = stream;
+// ── Play incoming audio ──
+let playbackCtx = null;
+let playbackQueue = [];
+let isPlaying = false;
+
+function getPlaybackCtx() {
+  if (!playbackCtx || playbackCtx.state === 'closed') playbackCtx = new AudioContext({ sampleRate: 16000 });
+  return playbackCtx;
 }
 
-function stopRemote() { if (remoteAudio) remoteAudio.srcObject = null; }
-function showIncoming(show) { document.getElementById('incoming-voice').style.display = show ? 'block' : 'none'; }
+function playAudioChunk(b64) {
+  // Decode base64 → int16 → float32
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i=0; i<binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  const int16 = new Int16Array(bytes.buffer);
+  const float32 = new Float32Array(int16.length);
+  for (let i=0; i<int16.length; i++) float32[i] = int16[i] / 32768;
+
+  const ctx = getPlaybackCtx();
+  const buf = ctx.createBuffer(1, float32.length, 16000);
+  buf.copyToChannel(float32, 0);
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+  src.connect(ctx.destination);
+  src.start();
+}
 
 // ── Invite ──
 function copyInvite() {
@@ -429,52 +413,52 @@ function copyInvite() {
   navigator.clipboard.writeText(url).then(() => toast('Invite link copied! 🔗'));
 }
 
-// ── Emoji/GIF Picker ──
+function showIncoming(show) { document.getElementById('incoming-voice').style.display = show?'block':'none'; }
+
+// ── Emoji / GIF Picker ──
 function togglePicker() {
-  const p = document.getElementById('picker');
-  const show = p.style.display !== 'block';
-  p.style.display = show ? 'block' : 'none';
-  if (show) renderPicker();
+  const p=document.getElementById('picker');
+  const show=p.style.display!=='block';
+  p.style.display=show?'block':'none';
+  if(show) renderPicker();
 }
-document.addEventListener('click', e => {
-  if (!e.target.closest('#picker')&&!e.target.closest('.emoji-btn')) document.getElementById('picker').style.display='none';
-});
+document.addEventListener('click', e=>{ if(!e.target.closest('#picker')&&!e.target.closest('.emoji-btn')) document.getElementById('picker').style.display='none'; });
 function switchTab(tab) {
-  pickerTab = tab;
-  document.querySelectorAll('.picker-tab').forEach((t,i) => t.classList.toggle('active',(i===0&&tab==='emoji')||(i===1&&tab==='gif')));
+  pickerTab=tab;
+  document.querySelectorAll('.picker-tab').forEach((t,i)=>t.classList.toggle('active',(i===0&&tab==='emoji')||(i===1&&tab==='gif')));
   renderPicker();
 }
 function renderPicker() {
-  const body = document.getElementById('picker-body');
-  if (pickerTab==='emoji') body.innerHTML=`<div class="emoji-grid">${EMOJIS.map(e=>`<span onclick="insertEmoji('${e}')">${e}</span>`).join('')}</div>`;
+  const body=document.getElementById('picker-body');
+  if(pickerTab==='emoji') body.innerHTML=`<div class="emoji-grid">${EMOJIS.map(e=>`<span onclick="insertEmoji('${e}')">${e}</span>`).join('')}</div>`;
   else body.innerHTML=`<input class="gif-search" placeholder="Search GIFs..." oninput="searchGif(this.value)"/><div id="gif-grid" class="gif-grid"><div class="gif-loading">Search above</div></div>`;
 }
 function insertEmoji(e) { document.getElementById('msg-input').value+=e; document.getElementById('picker').style.display='none'; }
 function searchGif(q) {
-  clearTimeout(gifTimeout); if (!q.trim()) return;
-  gifTimeout = setTimeout(async () => {
-    const grid = document.getElementById('gif-grid');
-    grid.innerHTML = '<div class="gif-loading">Loading...</div>';
+  clearTimeout(gifTimeout); if(!q.trim()) return;
+  gifTimeout=setTimeout(async()=>{
+    const grid=document.getElementById('gif-grid');
+    grid.innerHTML='<div class="gif-loading">Loading...</div>';
     try {
-      const r = await fetch(`https://tenor.googleapis.com/v2/search?q=${encodeURIComponent(q)}&key=${TENOR_KEY}&limit=8&media_filter=gif`);
-      const d = await r.json();
-      if (!d.results?.length) { grid.innerHTML='<div class="gif-loading">No results</div>'; return; }
-      grid.innerHTML = d.results.map(g => { const u=g.media_formats?.tinygif?.url||''; return u?`<img src="${u}" onclick="sendGif('${u}')" loading="lazy"/>`:'' }).join('');
-    } catch { grid.innerHTML='<div class="gif-loading">Failed</div>'; }
-  }, 500);
+      const r=await fetch(`https://tenor.googleapis.com/v2/search?q=${encodeURIComponent(q)}&key=${TENOR_KEY}&limit=8&media_filter=gif`);
+      const d=await r.json();
+      if(!d.results?.length){grid.innerHTML='<div class="gif-loading">No results</div>';return;}
+      grid.innerHTML=d.results.map(g=>{const u=g.media_formats?.tinygif?.url||'';return u?`<img src="${u}" onclick="sendGif('${u}')" loading="lazy"/>`:''}).join('');
+    } catch{grid.innerHTML='<div class="gif-loading">Failed</div>';}
+  },500);
 }
 function sendGif(url) {
-  const ts = new Date().toISOString();
+  const ts=new Date().toISOString();
   addBubble('me','gif',url,ts);
-  if (conn?.open) conn.send({ type:'gif', url, ts });
+  wsSend({ type:'gif', url, ts });
   document.getElementById('picker').style.display='none';
 }
 
 // ── Toast ──
 function toast(msg) {
-  const t = document.getElementById('toast');
-  t.textContent = msg; t.style.display = 'block';
-  setTimeout(() => t.style.display='none', 2500);
+  const t=document.getElementById('toast');
+  t.textContent=msg; t.style.display='block';
+  setTimeout(()=>t.style.display='none',2500);
 }
 </script>
 </body>
