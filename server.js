@@ -18,7 +18,6 @@ app.get('/', (req, res) => res.send('WalkiChat signaling server is running ✅')
 const peerServer = ExpressPeerServer(server, {
   allow_discovery: false,
   alive_timeout: 60000,
-  proxied: true, // important when running behind Render's proxy
 });
 
 // peer@1.x: path is just /peerjs — no key in URL
