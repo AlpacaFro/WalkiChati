@@ -1,5 +1,5 @@
 // server.js — WalkiChat relay server
-// WebSocket relay with text, GIF, push-to-talk audio, and active room list
+// WebSocket relay with text, GIF, push-to-talk audio, active room list, and rejoin-friendly rooms
 
 const express = require('express');
 const http = require('http');
@@ -21,12 +21,17 @@ const wss = new WebSocketServer({ server, path: '/ws' });
 // rooms shape:
 // {
 //   roomId: {
-//     host: WebSocket,
+//     host: WebSocket | null,
 //     guest: WebSocket | null,
-//     hostName: string
+//     hostName: string,
+//     createdAt: number
 //   }
 // }
 const rooms = {};
+
+// Keep empty rooms alive for a short period.
+// This lets someone return/rejoin after refresh or accidental close.
+const EMPTY_ROOM_TTL_MS = 10 * 60 * 1000;
 
 function send(ws, data) {
   if (ws && ws.readyState === WebSocket.OPEN) {
@@ -58,18 +63,76 @@ function relayToPeer(ws, msg) {
   send(peer, msg);
 }
 
+function isOpen(ws) {
+  return ws && ws.readyState === WebSocket.OPEN;
+}
+
+function cleanupOldEmptyRooms() {
+  const now = Date.now();
+
+  Object.keys(rooms).forEach((roomId) => {
+    const room = rooms[roomId];
+
+    const hasHost = isOpen(room.host);
+    const hasGuest = isOpen(room.guest);
+
+    if (!hasHost && !hasGuest && now - room.createdAt > EMPTY_ROOM_TTL_MS) {
+      delete rooms[roomId];
+      console.log(`[cleanup] Removed empty room: ${roomId}`);
+    }
+  });
+}
+
 function getActiveRooms() {
+  cleanupOldEmptyRooms();
+
   return Object.keys(rooms)
     .filter((roomId) => {
       const room = rooms[roomId];
 
-      // Show only rooms that have a host and are waiting for a guest
-      return room.host && room.host.readyState === WebSocket.OPEN && !room.guest;
+      // Show rooms that are joinable:
+      // 1. Host is waiting and no guest exists
+      // 2. Or room exists but both disconnected recently, so either side can rejoin
+      const hostOpen = isOpen(room.host);
+      const guestOpen = isOpen(room.guest);
+
+      return (hostOpen && !guestOpen) || (!hostOpen && !guestOpen);
     })
     .map((roomId) => ({
       roomId,
       hostName: rooms[roomId].hostName || 'Host'
     }));
+}
+
+function detachSocketFromRoom(ws) {
+  if (!ws.roomId || !rooms[ws.roomId]) return;
+
+  const roomId = ws.roomId;
+  const room = rooms[roomId];
+
+  if (ws.role === 'host' && room.host === ws) {
+    room.host = null;
+  }
+
+  if (ws.role === 'guest' && room.guest === ws) {
+    room.guest = null;
+  }
+
+  const peer = ws.role === 'host' ? room.guest : room.host;
+
+  send(peer, {
+    type: 'peer_disconnected'
+  });
+
+  ws.roomId = null;
+  ws.role = null;
+
+  // Do NOT delete the room immediately.
+  // This is the fix for "cannot rejoin room".
+  // The room survives for EMPTY_ROOM_TTL_MS.
+  room.createdAt = room.createdAt || Date.now();
+
+  console.log(`[-] User left room: ${roomId}`);
 }
 
 wss.on('connection', (ws) => {
@@ -94,7 +157,6 @@ wss.on('connection', (ws) => {
 
     console.log('[WS] Message:', msg.type);
 
-    // Show rooms waiting for a second person
     if (msg.type === 'list_rooms') {
       send(ws, {
         type: 'rooms_list',
@@ -103,7 +165,6 @@ wss.on('connection', (ws) => {
       return;
     }
 
-    // Host creates a room
     if (msg.type === 'create') {
       const id = createRoomId();
       const hostName = String(msg.name || 'Host').trim();
@@ -111,7 +172,8 @@ wss.on('connection', (ws) => {
       rooms[id] = {
         host: ws,
         guest: null,
-        hostName
+        hostName,
+        createdAt: Date.now()
       };
 
       ws.roomId = id;
@@ -127,7 +189,6 @@ wss.on('connection', (ws) => {
       return;
     }
 
-    // Guest joins a room
     if (msg.type === 'join') {
       const roomId = String(msg.roomId || '').trim();
       const name = String(msg.name || 'Friend').trim();
@@ -145,36 +206,89 @@ wss.on('connection', (ws) => {
       if (!room) {
         send(ws, {
           type: 'error',
-          msg: 'Room not found'
+          msg: 'Room not found or expired' 
         });
         return;
       }
 
-      if (room.guest) {
+      const hostOpen = isOpen(room.host);
+      const guestOpen = isOpen(room.guest);
+
+      // Case 1: host exists and guest slot is empty -> join as guest
+      if (hostOpen && !guestOpen) {
+        room.guest = ws;
+
+        ws.roomId = roomId;
+        ws.role = 'guest';
+        ws.name = name;
+
         send(ws, {
-          type: 'error',
-          msg: 'Room full'
+          type: 'joined',
+          roomId
         });
+
+        send(room.host, {
+          type: 'peer_joined',
+          name
+        });
+
+        console.log(`[+] Guest joined room: ${roomId}`);
         return;
       }
 
-      room.guest = ws;
+      // Case 2: guest exists and host slot is empty -> rejoin as host side
+      if (!hostOpen && guestOpen) {
+        room.host = ws;
+        room.hostName = name;
 
-      ws.roomId = roomId;
-      ws.role = 'guest';
-      ws.name = name;
+        ws.roomId = roomId;
+        ws.role = 'host';
+        ws.name = name;
+
+        send(ws, {
+          type: 'joined',
+          roomId
+        });
+
+        send(room.guest, {
+          type: 'peer_joined',
+          name
+        });
+
+        console.log(`[+] Host side rejoined room: ${roomId}`);
+        return;
+      }
+
+      // Case 3: both are gone but room is still within TTL -> first returner becomes host
+      if (!hostOpen && !guestOpen) {
+        room.host = ws;
+        room.guest = null;
+        room.hostName = name;
+        room.createdAt = Date.now();
+
+        ws.roomId = roomId;
+        ws.role = 'host';
+        ws.name = name;
+
+        send(ws, {
+          type: 'created',
+          roomId
+        });
+
+        console.log(`[+] Empty room restored by host: ${roomId}`);
+        return;
+      }
 
       send(ws, {
-        type: 'joined',
-        roomId
+        type: 'error',
+        msg: 'Room full'
       });
 
-      send(room.host, {
-        type: 'peer_joined',
-        name
-      });
+      return;
+    }
 
-      console.log(`[+] Guest joined room: ${roomId}`);
+    if (msg.type === 'leave') {
+      detachSocketFromRoom(ws);
       return;
     }
 
@@ -251,26 +365,15 @@ wss.on('connection', (ws) => {
 
   ws.on('close', () => {
     console.log('[WS] Client disconnected');
-
-    if (!ws.roomId || !rooms[ws.roomId]) return;
-
-    const roomId = ws.roomId;
-    const peer = getPeer(ws);
-
-    send(peer, {
-      type: 'peer_disconnected'
-    });
-
-    // Current app is 1 host + 1 guest, so closing either side closes the room
-    delete rooms[roomId];
-
-    console.log(`[-] Room closed: ${roomId}`);
+    detachSocketFromRoom(ws);
   });
 
   ws.on('error', (e) => {
     console.error('[WS] Error:', e.message);
   });
 });
+
+setInterval(cleanupOldEmptyRooms, 60 * 1000);
 
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
