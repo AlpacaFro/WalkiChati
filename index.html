@@ -438,9 +438,10 @@ function searchGif(q) {
   clearTimeout(gifTimeout);
 
   const grid = document.getElementById('gif-grid');
+  const query = q.trim();
 
   // When search is empty, reset the GIF panel
-  if (!q.trim()) {
+  if (!query) {
     grid.innerHTML = '<div class="gif-loading">Search above</div>';
     return;
   }
@@ -450,23 +451,31 @@ function searchGif(q) {
 
     try {
       const params = new URLSearchParams({
-        q: q.trim(),
-        key: TENOR_KEY,
-        client_key: 'walkichat',
+        api_key: GIPHY_KEY,
+        q: query,
         limit: '8',
-        media_filter: 'tinygif,gif',
-        contentfilter: 'medium'
+        rating: 'pg-13',
+        lang: 'en'
       });
 
-      const r = await fetch(`https://tenor.googleapis.com/v2/search?${params.toString()}`);
+      const url = `https://api.giphy.com/v1/gifs/search?${params.toString()}`;
 
-      if (!r.ok) {
-        throw new Error('Tenor request failed');
+      console.log('GIPHY request:', url);
+
+      const response = await fetch(url);
+
+      if (!response.ok) {
+        const errorText = await response.text();
+
+        console.error('GIPHY status:', response.status);
+        console.error('GIPHY response:', errorText);
+
+        throw new Error('GIPHY request failed');
       }
 
-      const d = await r.json();
+      const data = await response.json();
 
-      if (!d.results || !d.results.length) {
+      if (!data.data || !data.data.length) {
         grid.innerHTML = '<div class="gif-loading">No results</div>';
         return;
       }
@@ -474,17 +483,22 @@ function searchGif(q) {
       // Build GIF elements safely instead of inline onclick strings
       grid.innerHTML = '';
 
-      d.results.forEach(g => {
-        const url = g.media_formats?.tinygif?.url || g.media_formats?.gif?.url;
-        if (!url) return;
+      data.data.forEach((gif) => {
+        const gifUrl =
+          gif.images?.fixed_width_small?.url ||
+          gif.images?.downsized_medium?.url ||
+          gif.images?.original?.url;
+
+        if (!gifUrl) return;
 
         const img = document.createElement('img');
-        img.src = url;
+
+        img.src = gifUrl;
         img.alt = 'GIF result';
         img.loading = 'lazy';
 
         img.addEventListener('click', () => {
-          sendGif(url);
+          sendGif(gifUrl);
         });
 
         grid.appendChild(img);
@@ -493,6 +507,7 @@ function searchGif(q) {
       if (!grid.children.length) {
         grid.innerHTML = '<div class="gif-loading">No usable GIFs</div>';
       }
+
     } catch (err) {
       console.error('GIF search failed:', err);
       grid.innerHTML = '<div class="gif-loading">GIF search failed</div>';
