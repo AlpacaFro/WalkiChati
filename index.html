@@ -195,7 +195,7 @@ const EMOJIS = ['😀','😂','🥰','😎','🤔','😅','😭','🥳','😴','
 // ── State ──
 let ws, myName='', roomId='', isDark=false;
 let pttActive=false, pttSetupDone=false;
-let mediaStream=null, audioCtx=null, processor=null, source=null;
+let mediaStream=null, mediaRecorder=null, recordedChunks=[];
 let pickerTab='emoji', gifTimeout=null;
 
 // ── WebSocket connect ──
@@ -244,6 +244,8 @@ function handleMsg(msg) {
     showIncoming(true);
   } else if (msg.type === 'ptt_stop') {
     showIncoming(false);
+  } else if (msg.type === 'audio_blob') {
+    playAudioBlob(msg.data, msg.mimeType);
   } else if (msg.type === 'audio') {
     playAudioChunk(msg.data);
   } else if (msg.type === 'peer_disconnected') {
@@ -420,8 +422,6 @@ function setupPTT() {
 
   const btn = document.getElementById('ptt-btn');
 
-  // Pointer events behave better across mouse + touch.
-  // Hold = start, release/cancel/leave = stop.
   btn.addEventListener('pointerdown', (e) => {
     e.preventDefault();
     btn.setPointerCapture?.(e.pointerId);
@@ -438,18 +438,16 @@ function setupPTT() {
     stopPTT();
   });
 
-  btn.addEventListener('pointerleave', (e) => {
-    // If user drags away while holding, stop the mic.
+  btn.addEventListener('pointerleave', () => {
     if (pttActive) stopPTT();
   });
 
-  // Safety: if browser/tab loses focus while holding, stop mic.
   window.addEventListener('blur', stopPTT);
+
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) stopPTT();
   });
 
-  // Spacebar hold-to-talk.
   document.addEventListener('keydown', (e) => {
     const isTyping =
       e.target.tagName === 'TEXTAREA' ||
@@ -474,9 +472,66 @@ async function startPTT() {
 
   try {
     mediaStream = await navigator.mediaDevices.getUserMedia({
-      audio: true,
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+        channelCount: 1,
+        sampleRate: 48000
+      },
       video: false
     });
+
+    recordedChunks = [];
+
+    const mimeType =
+      MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+        ? 'audio/webm;codecs=opus'
+        : MediaRecorder.isTypeSupported('audio/webm')
+          ? 'audio/webm'
+          : '';
+
+    mediaRecorder = new MediaRecorder(
+      mediaStream,
+      mimeType ? { mimeType, audioBitsPerSecond: 48000 } : { audioBitsPerSecond: 48000 }
+    );
+
+    mediaRecorder.ondataavailable = async (event) => {
+      if (!event.data || event.data.size === 0) return;
+      recordedChunks.push(event.data);
+    };
+
+    mediaRecorder.onstop = async () => {
+      try {
+        const blob = new Blob(recordedChunks, {
+          type: mediaRecorder.mimeType || 'audio/webm'
+        });
+
+        recordedChunks = [];
+
+        if (blob.size === 0) return;
+
+        const arrayBuffer = await blob.arrayBuffer();
+        const bytes = new Uint8Array(arrayBuffer);
+
+        let binary = '';
+
+        for (let i = 0; i < bytes.length; i++) {
+          binary += String.fromCharCode(bytes[i]);
+        }
+
+        wsSend({
+          type: 'audio_blob',
+          data: btoa(binary),
+          mimeType: blob.type || 'audio/webm',
+          ts: new Date().toISOString()
+        });
+      } catch (err) {
+        console.error('Failed to send recorded audio:', err);
+      }
+    };
+
+    mediaRecorder.start();
 
     pttActive = true;
     document.getElementById('ptt-btn').classList.add('active');
@@ -485,54 +540,7 @@ async function startPTT() {
       type: 'ptt_start'
     });
 
-    audioCtx = new AudioContext({
-      sampleRate: 16000
-    });
-
-    source = audioCtx.createMediaStreamSource(mediaStream);
-    processor = audioCtx.createScriptProcessor(4096, 1, 1);
-
-    source.connect(processor);
-
-    // Important:
-    // Some browsers require ScriptProcessor to be connected,
-    // but connecting it to destination can cause local echo.
-    // We connect through a muted gain node instead.
-    const silentGain = audioCtx.createGain();
-    silentGain.gain.value = 0;
-
-    processor.connect(silentGain);
-    silentGain.connect(audioCtx.destination);
-
-    processor.onaudioprocess = (e) => {
-      if (!pttActive) return;
-
-      const float32 = e.inputBuffer.getChannelData(0);
-      const int16 = new Int16Array(float32.length);
-
-      for (let i = 0; i < float32.length; i++) {
-        int16[i] = Math.max(
-          -32768,
-          Math.min(32767, float32[i] * 32768)
-        );
-      }
-
-      const bytes = new Uint8Array(int16.buffer);
-
-      let binary = '';
-
-      for (let i = 0; i < bytes.length; i++) {
-        binary += String.fromCharCode(bytes[i]);
-      }
-
-      wsSend({
-        type: 'audio',
-        data: btoa(binary),
-        sampleRate: 16000
-      });
-    };
-
-    console.log('🎙️ PTT started');
+    console.log('🎙️ PTT recording started');
   } catch (e) {
     console.error('Mic error:', e);
     toast('Mic access denied');
@@ -548,7 +556,7 @@ async function startPTT() {
 }
 
 function stopPTT() {
-  if (!pttActive && !mediaStream && !audioCtx) return;
+  if (!pttActive && !mediaRecorder && !mediaStream) return;
 
   pttActive = false;
 
@@ -558,31 +566,57 @@ function stopPTT() {
     type: 'ptt_stop'
   });
 
-  if (processor) {
-    processor.onaudioprocess = null;
-    processor.disconnect();
-    processor = null;
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    mediaRecorder.stop();
   }
 
-  if (source) {
-    source.disconnect();
-    source = null;
-  }
-
-  if (audioCtx) {
-    audioCtx.close();
-    audioCtx = null;
-  }
+  mediaRecorder = null;
 
   if (mediaStream) {
     mediaStream.getTracks().forEach((track) => track.stop());
     mediaStream = null;
   }
 
-  console.log('🎙️ PTT stopped');
+  console.log('🎙️ PTT recording stopped');
 }
 
 // ── Play incoming audio ──
+
+function playAudioBlob(b64, mimeType = 'audio/webm') {
+  try {
+    const binary = atob(b64);
+    const bytes = new Uint8Array(binary.length);
+
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+
+    const blob = new Blob([bytes], {
+      type: mimeType || 'audio/webm'
+    });
+
+    const url = URL.createObjectURL(blob);
+    const audio = new Audio(url);
+
+    audio.onended = () => {
+      URL.revokeObjectURL(url);
+    };
+
+    audio.onerror = () => {
+      URL.revokeObjectURL(url);
+      console.error('Could not play incoming audio blob');
+    };
+
+    audio.play().catch((err) => {
+      console.error('Audio playback blocked:', err);
+      toast('Tap once to enable audio playback');
+    });
+  } catch (err) {
+    console.error('Failed to play audio blob:', err);
+  }
+}
+
+
 let playbackCtx = null;
 let playbackQueue = [];
 let isPlaying = false;
